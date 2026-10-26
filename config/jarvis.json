@@ -1,0 +1,52 @@
+{
+  "roku": {
+    "host": "10.0.0.43",
+    "port": 8060,
+    "timeout_seconds": 8,
+    "rediscover": true
+  },
+  "ollama": {
+    "base_url": "http://127.0.0.1:11434",
+    "model": "qwen3:4b",
+    "timeout_seconds": 240,
+    "max_predict_tokens": 160
+  },
+  "remote_inference": {
+    "enabled": false,
+    "base_url": "",
+    "model": "",
+    "allow_private_memory": false
+  },
+  "paths": {
+    "data_dir": "",
+    "whisper_bin": "",
+    "whisper_model": "",
+    "piper_bin": "",
+    "piper_voice": ""
+  },
+  "audio": {
+    "wake_word": "jarvis",
+    "followup_seconds": 20,
+    "sample_rate": 16000,
+    "speech_level": 0.045,
+    "silence_level": 0.03,
+    "silence_seconds": 1.1,
+    "max_phrase_seconds": 12
+  },
+  "agent": {
+    "max_steps": 4,
+    "max_seconds": 90,
+    "retry_wait_seconds": 0.4
+  },
+  "permissions": {
+    "roku_standing_authorization": true
+  },
+  "quiet_hours": {
+    "start": "",
+    "end": ""
+  },
+  "face": {
+    "host": "0.0.0.0",
+    "port": 8765
+  }
+}

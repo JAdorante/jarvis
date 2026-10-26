@@ -1,0 +1,16 @@
+[Unit]
+Description=Jarvis local assistant
+After=network-online.target sound.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=jadorante
+WorkingDirectory=/home/jadorante/jarvis-system
+ExecStart=/usr/bin/python3 -m jarvis
+Restart=on-failure
+RestartSec=5
+# The microphone and HDMI audio belong to this service. Do not also run jarvis_listen.py.
+
+[Install]
+WantedBy=multi-user.target
