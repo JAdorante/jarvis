@@ -15,9 +15,10 @@ class Speaker:
         self._lock = threading.Lock()
 
     def speak(self, text):
+        """Return True when playback finished. False means nobody heard it."""
         words = " ".join((text or "").split())
         if not words:
-            return
+            return True
         wav = None
         try:
             device = hdmi_device()
@@ -42,10 +43,11 @@ class Speaker:
                     stderr=subprocess.DEVNULL,
                 )
                 proc = self._proc
-            proc.wait()
+            return proc.wait() == 0
         except (OSError, subprocess.CalledProcessError, SystemExit) as exc:
             print(words)
             print(f"Speech output is unavailable: {exc}", file=sys.stderr)
+            return False
         finally:
             with self._lock:
                 self._proc = None

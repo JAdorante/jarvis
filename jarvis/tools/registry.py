@@ -1,5 +1,6 @@
 """Tool definitions, validation, and audited execution."""
 
+import threading
 import time
 from dataclasses import dataclass, field
 from typing import Optional
@@ -81,7 +82,7 @@ class Registry:
                 )
             else:
                 try:
-                    result = tool.handler(arguments, context)
+                    result = _run_bounded(tool, arguments, context)
                     result.tool = name
                 except Exception as exc:
                     result = ToolResult(
@@ -104,6 +105,32 @@ class Registry:
                 verified,
             )
         return result
+
+
+def _run_bounded(tool, arguments, context):
+    """Hold a tool to its timeout. A timed-out call is reported as unconfirmed, never retried."""
+    box = {}
+
+    def work():
+        try:
+            box["result"] = tool.handler(arguments, context)
+        except Exception as exc:
+            box["error"] = exc
+
+    thread = threading.Thread(target=work, name=f"jarvis-tool-{tool.name}", daemon=True)
+    thread.start()
+    thread.join(tool.timeout)
+    if thread.is_alive():
+        return ToolResult(
+            ok=False,
+            output={},
+            speech=f"The {tool.name} tool took too long, so I stopped waiting. I do not know if it finished.",
+            error_code="timeout",
+            verified=False,
+        )
+    if "error" in box:
+        raise box["error"]
+    return box["result"]
 
 
 def _arguments_ok(tool, arguments):

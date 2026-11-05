@@ -44,7 +44,18 @@ The database is `~/jarvis/jarvis.sqlite`. On first start, lines already in `~/ja
 python3 -m jarvis --backup
 ```
 
-Backups land in `~/jarvis/backups/`.
+Backups land in `~/jarvis/backups/`. Each one is checked before it is kept. To restore, stop the service, copy the backup over `~/jarvis/jarvis.sqlite`, delete `jarvis.sqlite-wal` and `jarvis.sqlite-shm` next to it, and start the service.
+
+## Sparrow
+
+Everything is off until you set it in the `sparrow` block of `config/jarvis.json`. `enabled` turns on asking, `share_transcripts` sends sentences addressed to Jarvis, and `poll_outbox` speaks items Sparrow queues.
+
+Asking needs the MCP token in `~/jarvis/sparrow_mcp_token`, mode 600. Sharing and the outbox need a device token. Start phone pairing in Sparrow, then:
+
+```bash
+python3 -m jarvis --sparrow-pair <code>
+python3 -m jarvis --sparrow-check
+```
 
 ## Useful commands
 
@@ -64,4 +75,4 @@ Change the TV address in `config/jarvis.json` if the Roku is no longer at `10.0.
 python -m unittest discover -s tests
 ```
 
-Those tests use stand-ins for the TV and Wikipedia. They do not measure the Pi.
+Those tests use stand-ins for the TV, Wikipedia, and Sparrow. They do not measure the Pi.

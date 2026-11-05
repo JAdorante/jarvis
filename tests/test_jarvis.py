@@ -199,12 +199,11 @@ class JarvisTests(unittest.TestCase):
         self.assertEqual([item.tool for item in result["results"]], ["web.wikipedia"])
 
     def test_email_is_not_sent(self):
-        missing = self.agent.handle("Send an email to my friend.")
-        self.assertEqual(missing["status"], "WAITING_FOR_USER")
-        self.assertEqual(missing["results"], [])
-        draft = self.agent.handle("Send an email to ada@example.com saying hello.")
-        self.assertEqual(draft["status"], "WAITING_FOR_APPROVAL")
-        self.assertIn("nothing has been sent", draft["speech"])
+        for sentence in ("Send an email to my friend.", "Send an email to ada@example.com saying hello."):
+            result = self.agent.handle(sentence)
+            self.assertEqual(result["results"], [])
+            self.assertIn("Nothing has been sent", result["speech"])
+            self.assertNotIn("drafted", result["speech"])
         self.assertEqual(self.roku.calls, [])
 
     def test_profile_request_does_not_press_remote_keys(self):
@@ -251,12 +250,12 @@ class JarvisTests(unittest.TestCase):
         created = self.agent.handle("Remind me in two minutes to check the oven.", now=start)
         self.assertEqual(created["status"], "COMPLETED")
         spoken = []
-        quiet = Scheduler(self.store, spoken.append, self.roku, "23:00", "07:00")
+        quiet = Scheduler(self.store, spoken.append, None, "23:00", "07:00")
         local_quiet = datetime(2026, 10, 26, 23, 30)
         self.assertEqual(quiet.tick(start + timedelta(minutes=2), local_quiet), [])
         self.assertEqual(spoken, [])
         self.assertEqual(len(self.store.pending_reminders()), 1)
-        open_hours = Scheduler(self.store, spoken.append, self.roku, "", "")
+        open_hours = Scheduler(self.store, spoken.append, None, "", "")
         events = open_hours.tick(start + timedelta(minutes=2), datetime(2026, 10, 26, 12, 0))
         self.assertEqual(len(events), 1)
         self.assertIn("oven", events[0]["speech"])
@@ -266,11 +265,16 @@ class JarvisTests(unittest.TestCase):
     def test_midnight_power_off_is_saved_and_runs(self):
         self.agent.handle("Turn off the TV at midnight.")
         spoken = []
-        scheduler = Scheduler(self.store, spoken.append, self.roku, "23:00", "07:00")
+        registry = self.agent.registry
+
+        def call_tool(name, arguments, trigger):
+            return registry.call(name, arguments, {}, self.agent.permissions, self.store, trigger)
+
+        scheduler = Scheduler(self.store, spoken.append, call_tool, "23:00", "07:00")
         events = scheduler.tick(datetime(2026, 10, 26, 4, 0, tzinfo=timezone.utc), datetime(2026, 10, 26, 0, 0))
         self.assertEqual(self.roku.calls, [("power", False)])
         self.assertEqual(len(events), 1)
-        self.assertTrue(spoken)
+        self.assertEqual(spoken, [])
 
     def test_restart_does_not_repeat_a_running_task(self):
         self.store.add_reminder("check the oven", "2026-10-26T04:00:00+00:00")

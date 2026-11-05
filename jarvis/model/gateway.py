@@ -1,8 +1,28 @@
 """Local Ollama by default. Remote inference stays off until configured."""
 
 import json
+import re
 import urllib.error
 import urllib.request
+
+ACTION_CLAIM = re.compile(
+    r"\b(?:i(?:'ve| have| just)?|i'll|i will|i'm going to)\s+(?:now\s+|just\s+|already\s+)?"
+    r"(?:turn(?:ed)?|set|mute[d]?|unmute[d]?|open(?:ed)?|launch(?:ed)?|switch(?:ed)?|change[d]?|save[d]?|"
+    r"store[d]?|remembered|remind|schedule[d]?|send|sent|add(?:ed)?|create[d]?|cancel(?:l?ed)?|delete[d]?|"
+    r"play(?:ed)?|start(?:ed)?)\b"
+    r"|\b(?:i'll|i will) remember\b"
+    r"|\b(?:reminder|alarm|timer)\s+(?:is|has been)\s+set\b"
+    r"|\bthe (?:tv|television|volume)\s+(?:is|has been)\s+(?:now\s+)?(?:on|off|up|down|muted)\b"
+    r"|^\s*done\b",
+    re.I,
+)
+NO_ACTION_TAKEN = "I did not change anything, because I have no tool for that request."
+
+
+def guard_reply(reply):
+    """Only a tool result can report an action. The model's say-so cannot."""
+    return NO_ACTION_TAKEN if ACTION_CLAIM.search(reply or "") else reply
+
 
 
 class ModelGateway:
@@ -65,7 +85,7 @@ class ModelGateway:
                 ],
                 private=True,
             )
-        except (OSError, urllib.error.URLError, TimeoutError, KeyError, ValueError):
+        except (OSError, urllib.error.URLError, TimeoutError, KeyError, IndexError, ValueError):
             if memories:
                 return memories[0]
             return "I can't reach the local model right now."
@@ -111,8 +131,6 @@ class ModelGateway:
 
 
 def _clean(text):
-    import re
-
     text = re.sub(r"<think>.*?</think>", "", text or "", flags=re.S | re.I)
     return text.strip()
 
@@ -122,6 +140,6 @@ def _without_private(messages):
     for message in messages:
         content = message.get("content", "")
         if "Saved facts:" in content:
-            content = content.split("Saved facts:", 1)[0] + "Saved facts:\n[omitted]\n"
+            content = re.sub(r"Saved facts:.*?(?:\n\n|$)", "Saved facts:\n[omitted]\n\n", content, count=1, flags=re.S)
         cleaned.append({**message, "content": content})
     return cleaned

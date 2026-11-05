@@ -1,5 +1,7 @@
-"""SQLite memory. Text files are imported once and left in place."""
+"""SQLite memory. Text files are imported once. A forgotten fact stays gone."""
 
+import hashlib
+import os
 import shutil
 import sqlite3
 import threading
@@ -13,6 +15,8 @@ STOPWORDS = {
     "who", "do", "does", "did", "about", "to", "of", "and", "or", "for", "that",
     "this", "it", "please", "jarvis",
 }
+FORGET_NOISE = {"everything", "all", "anything", "saved", "fact", "facts", "preference", "preferences"}
+FORGOTTEN = "[forgotten]"
 
 
 def utc_now():
@@ -27,6 +31,7 @@ class MemoryStore:
         self.db = sqlite3.connect(self.path, check_same_thread=False)
         self.db.row_factory = sqlite3.Row
         self.db.execute("PRAGMA journal_mode=WAL")
+        self.db.execute("PRAGMA secure_delete=ON")
         self._init()
 
     def close(self):
@@ -93,9 +98,24 @@ class MemoryStore:
                 last_run TEXT,
                 enabled INTEGER NOT NULL
             );
+            CREATE TABLE IF NOT EXISTS forgotten (
+                content_hash TEXT PRIMARY KEY,
+                created_at TEXT NOT NULL
+            );
             """
         )
+        self._migrate_soft_deletes()
         self.db.commit()
+
+    def _migrate_soft_deletes(self):
+        """Older versions only hid forgotten rows. Erase them, and any copy a restart re-imported."""
+        rows = self.db.execute("SELECT id, content FROM memories WHERE superseded_by = -1").fetchall()
+        for row in rows:
+            self.db.execute(
+                "DELETE FROM memories WHERE lower(content) = lower(?) AND provenance LIKE 'imported%' AND superseded_by IS NULL",
+                (row["content"],),
+            )
+            self._erase(row["id"], row["content"])
 
     def _meta(self, key):
         row = self.db.execute("SELECT value FROM meta WHERE key = ?", (key,)).fetchone()
@@ -124,6 +144,7 @@ class MemoryStore:
                 """,
                 (category, kind, content, provenance, confidence, now, now),
             )
+            self.db.execute("DELETE FROM forgotten WHERE content_hash = ?", (_content_hash(content),))
             self.db.commit()
             return int(cursor.lastrowid), True
 
@@ -160,25 +181,66 @@ class MemoryStore:
             rows = self.db.execute(sql, values).fetchall()
         return [dict(row) for row in rows]
 
-    def forget_matching(self, query):
-        matches = self.search(query, limit=50)
-        if not matches and query.strip():
-            lowered = query.lower()
-            with self._lock:
-                rows = self.db.execute(
-                    "SELECT * FROM memories WHERE superseded_by IS NULL AND lower(content) LIKE ?",
-                    (f"%{lowered}%",),
-                ).fetchall()
-            matches = [dict(row) for row in rows]
-        now = utc_now()
+    def forget_candidates(self, query):
+        """Facts a forget request could mean. Whole words only. A vague query matches nothing."""
+        tokens = [_stem(word) for word in re_words(query) if word not in STOPWORDS and word not in FORGET_NOISE]
+        if not tokens:
+            return []
         with self._lock:
-            for item in matches:
-                self.db.execute(
-                    "UPDATE memories SET superseded_by = -1, updated_at = ? WHERE id = ?",
-                    (now, item["id"]),
-                )
+            rows = self.db.execute("SELECT * FROM memories WHERE superseded_by IS NULL").fetchall()
+        strong = []
+        weak = []
+        for row in rows:
+            words = {_stem(word) for word in re_words(row["content"])}
+            if all(token in words for token in tokens):
+                strong.append(dict(row))
+            elif any(token in words for token in tokens):
+                weak.append(dict(row))
+        return strong or weak
+
+    def forget_ids(self, ids, legacy_files=()):
+        """Erase these facts everywhere Jarvis keeps them. Existing backups are not touched."""
+        forgotten = []
+        with self._lock:
+            for memory_id in ids:
+                row = self.db.execute("SELECT id, content FROM memories WHERE id = ?", (memory_id,)).fetchone()
+                if row is None:
+                    continue
+                self._erase(row["id"], row["content"])
+                forgotten.append(row["content"])
             self.db.commit()
-        return len(matches)
+            self.db.execute("PRAGMA wal_checkpoint(TRUNCATE)")
+        for path in legacy_files:
+            for candidate in (Path(path), Path(path).with_name(Path(path).name + ".bak")):
+                _remove_lines(candidate, forgotten)
+        return len(forgotten)
+
+    def _erase(self, memory_id, content):
+        self.db.execute("DELETE FROM memories WHERE id = ?", (memory_id,))
+        self.db.execute(
+            "INSERT OR IGNORE INTO forgotten(content_hash, created_at) VALUES(?, ?)",
+            (_content_hash(content), utc_now()),
+        )
+        core = " ".join(content.split()).strip(" .").lower()
+        if not core:
+            return
+        triggers = self.db.execute(
+            "SELECT DISTINCT trigger_text FROM audit WHERE tool = 'memory.remember' AND instr(lower(arguments), ?) > 0",
+            (core,),
+        ).fetchall()
+        for text in [core] + [row["trigger_text"].lower() for row in triggers if row["trigger_text"].strip()]:
+            self.db.execute(
+                "DELETE FROM turns WHERE instr(lower(user_text), ?) > 0 OR instr(lower(assistant_text), ?) > 0",
+                (text, text),
+            )
+            self.db.execute(
+                "UPDATE tasks SET objective = ?, detail = '' WHERE instr(lower(objective), ?) > 0 OR instr(lower(detail), ?) > 0",
+                (FORGOTTEN, text, text),
+            )
+            self.db.execute(
+                "UPDATE audit SET trigger_text = ?, arguments = '{}' WHERE instr(lower(trigger_text), ?) > 0 OR instr(lower(arguments), ?) > 0",
+                (FORGOTTEN, text, text),
+            )
 
     def import_legacy(self, user_file, existence_file):
         """Copy original text files aside once, then import lines that are not stored yet."""
@@ -194,11 +256,19 @@ class MemoryStore:
                 shutil.copy2(path, backup)
             for line in path.read_text(encoding="utf-8", errors="replace").splitlines():
                 fact = line.strip()
-                if not fact:
+                if not fact or self._is_forgotten(fact):
                     continue
                 _, created = self.add_memory(fact, category, provenance, confidence=1.0)
                 imported += int(created)
         return imported
+
+    def _is_forgotten(self, content):
+        with self._lock:
+            row = self.db.execute(
+                "SELECT 1 FROM forgotten WHERE content_hash = ?",
+                (_content_hash(content),),
+            ).fetchone()
+        return row is not None
 
     def append_legacy_user_line(self, user_file, fact):
         path = Path(user_file)
@@ -241,7 +311,7 @@ class MemoryStore:
     def unfinished_tasks(self):
         with self._lock:
             rows = self.db.execute(
-                "SELECT * FROM tasks WHERE status IN ('CREATED', 'PLANNING', 'RUNNING', 'WAITING_FOR_TOOL', 'RETRYING')"
+                "SELECT * FROM tasks WHERE status IN ('CREATED', 'PLANNING', 'RUNNING', 'WAITING_FOR_TOOL', 'RETRYING', 'WAITING_FOR_USER', 'WAITING_FOR_APPROVAL')"
             ).fetchall()
         return [dict(row) for row in rows]
 
@@ -285,28 +355,43 @@ class MemoryStore:
             ).fetchall()
         return [dict(row) for row in rows]
 
-    def add_routine(self, name, action, argument, hour, minute):
+    def cancel_reminder(self, reminder_id):
         with self._lock:
+            self.db.execute("UPDATE reminders SET status = 'cancelled' WHERE id = ?", (reminder_id,))
+            self.db.commit()
+
+    def add_routine(self, name, action, argument, hour, minute, now_local=None):
+        """Saving the same routine twice keeps one. A time already passed today starts tomorrow."""
+        now_local = now_local or datetime.now()
+        hour, minute = int(hour), int(minute)
+        passed = (hour, minute) <= (now_local.hour, now_local.minute)
+        last_run = now_local.date().isoformat() if passed else ""
+        with self._lock:
+            existing = self.db.execute(
+                "SELECT id FROM routines WHERE enabled = 1 AND action = ? AND argument = ? AND hour = ? AND minute = ?",
+                (action, argument, hour, minute),
+            ).fetchone()
+            if existing:
+                return int(existing["id"])
             cursor = self.db.execute(
                 """
                 INSERT INTO routines(name, action, argument, hour, minute, last_run, enabled)
-                VALUES(?, ?, ?, ?, ?, '', 1)
+                VALUES(?, ?, ?, ?, ?, ?, 1)
                 """,
-                (name, action, argument, int(hour), int(minute)),
+                (name, action, argument, hour, minute, last_run),
             )
             self.db.commit()
             return int(cursor.lastrowid)
 
-    def due_routines(self, hour, minute, today):
+    def active_routines(self):
         with self._lock:
-            rows = self.db.execute(
-                """
-                SELECT * FROM routines
-                WHERE enabled = 1 AND hour = ? AND minute = ? AND (last_run IS NULL OR last_run != ?)
-                """,
-                (int(hour), int(minute), today),
-            ).fetchall()
+            rows = self.db.execute("SELECT * FROM routines WHERE enabled = 1 ORDER BY hour, minute").fetchall()
         return [dict(row) for row in rows]
+
+    def disable_routine(self, routine_id):
+        with self._lock:
+            self.db.execute("UPDATE routines SET enabled = 0 WHERE id = ?", (routine_id,))
+            self.db.commit()
 
     def mark_routine_ran(self, routine_id, today):
         with self._lock:
@@ -314,11 +399,23 @@ class MemoryStore:
             self.db.commit()
 
     def backup_to(self, dest):
+        """Copy through SQLite so recent changes in the WAL file are included, then check the copy."""
         dest = Path(dest)
         dest.parent.mkdir(parents=True, exist_ok=True)
-        with self._lock:
-            self.db.commit()
-            shutil.copy2(self.path, dest)
+        partial = dest.with_name(dest.name + ".partial")
+        partial.unlink(missing_ok=True)
+        copy = sqlite3.connect(partial)
+        try:
+            with self._lock:
+                self.db.commit()
+                self.db.backup(copy)
+            status = copy.execute("PRAGMA integrity_check").fetchone()[0]
+        finally:
+            copy.close()
+        if status != "ok":
+            partial.unlink(missing_ok=True)
+            raise sqlite3.DatabaseError(f"Backup failed its integrity check: {status}")
+        os.replace(partial, dest)
         return dest
 
 
@@ -326,3 +423,27 @@ def re_words(text):
     import re
 
     return re.findall(r"[a-z0-9']+", text.lower())
+
+
+def _stem(word):
+    word = word.removesuffix("'s")
+    if len(word) > 3 and word.endswith("s") and not word.endswith("ss"):
+        return word[:-1]
+    return word
+
+
+def _content_hash(content):
+    return hashlib.sha256(" ".join(content.split()).lower().encode()).hexdigest()
+
+
+def _remove_lines(path, facts):
+    if not facts or not path.exists():
+        return
+    unwanted = {" ".join(fact.split()).lower() for fact in facts}
+    lines = path.read_text(encoding="utf-8", errors="replace").splitlines(keepends=True)
+    kept = [line for line in lines if " ".join(line.split()).lower() not in unwanted]
+    if len(kept) == len(lines):
+        return
+    partial = path.with_name(path.name + ".partial")
+    partial.write_text("".join(kept), encoding="utf-8")
+    os.replace(partial, path)

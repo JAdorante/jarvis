@@ -3,7 +3,7 @@
     "host": "10.0.0.43",
     "port": 8060,
     "timeout_seconds": 8,
-    "rediscover": true
+    "pi_input": ""
   },
   "ollama": {
     "base_url": "http://127.0.0.1:11434",
@@ -36,7 +36,8 @@
   "agent": {
     "max_steps": 4,
     "max_seconds": 90,
-    "retry_wait_seconds": 0.4
+    "retry_wait_seconds": 0.4,
+    "pending_seconds": 60
   },
   "permissions": {
     "roku_standing_authorization": true
@@ -46,7 +47,18 @@
     "end": ""
   },
   "face": {
-    "host": "0.0.0.0",
+    "host": "127.0.0.1",
     "port": 8765
+  },
+  "sparrow": {
+    "enabled": false,
+    "base_url": "https://sparrow.ravenry.us",
+    "mcp_token_file": "",
+    "device_token_file": "",
+    "device_id": "jarvis-pi",
+    "timeout_seconds": 10,
+    "share_transcripts": false,
+    "poll_outbox": false,
+    "poll_seconds": 60
   }
 }

@@ -20,6 +20,8 @@ def extract_fact(text):
         return None
     name = re.search(r"\bmy name is ([a-z][a-z' -]{0,40})", lowered)
     remembered = re.split(r"\bremember that\b", text, maxsplit=1, flags=re.I)
+    if len(remembered) == 1:
+        remembered = re.split(r"^\s*(?:please\s+)?remember\b(?!\s+to\b)", text, maxsplit=1, flags=re.I)
     like = re.search(r"\bi (like|love|prefer|hate) (.+)", lowered)
     usual = re.search(r"\bi usually ([a-z0-9' ,-]{3,80})", lowered)
     if name:

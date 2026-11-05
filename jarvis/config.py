@@ -15,7 +15,7 @@ class Settings:
     roku_host: str
     roku_port: int
     roku_timeout: float
-    roku_rediscover: bool
+    roku_pi_input: str
     ollama_url: str
     model: str
     ollama_timeout: float
@@ -39,12 +39,14 @@ class Settings:
     max_steps: int
     max_seconds: float
     retry_wait_seconds: float
+    pending_seconds: float
     roku_standing_authorization: bool
     quiet_start: str
     quiet_end: str
     face_host: str
     face_port: int
     config_path: Path
+    sparrow: object = None
 
 
 def _path(value, fallback):
@@ -67,6 +69,9 @@ def load_settings(path=None):
     permissions = raw.get("permissions", {})
     quiet = raw.get("quiet_hours", {})
     face = raw.get("face", {})
+    from jarvis.sparrow import load_sparrow_settings
+
+    sparrow = load_sparrow_settings(raw.get("sparrow", {}))
     home = Path.home()
     data_dir = _path(paths.get("data_dir"), home / "jarvis")
     host = os.environ.get("JARVIS_ROKU_HOST", roku.get("host", "10.0.0.43"))
@@ -74,7 +79,7 @@ def load_settings(path=None):
         roku_host=host,
         roku_port=int(roku.get("port", 8060)),
         roku_timeout=float(roku.get("timeout_seconds", 8)),
-        roku_rediscover=bool(roku.get("rediscover", True)),
+        roku_pi_input=(roku.get("pi_input") or "").strip(),
         ollama_url=ollama.get("base_url", "http://127.0.0.1:11434").rstrip("/"),
         model=ollama.get("model", "jarvis"),
         ollama_timeout=float(ollama.get("timeout_seconds", 180)),
@@ -98,10 +103,12 @@ def load_settings(path=None):
         max_steps=int(agent.get("max_steps", 4)),
         max_seconds=float(agent.get("max_seconds", 90)),
         retry_wait_seconds=float(agent.get("retry_wait_seconds", 0.4)),
+        pending_seconds=float(agent.get("pending_seconds", 60)),
         roku_standing_authorization=bool(permissions.get("roku_standing_authorization", True)),
         quiet_start=quiet.get("start") or "",
         quiet_end=quiet.get("end") or "",
-        face_host=face.get("host", "0.0.0.0"),
+        face_host=face.get("host", "127.0.0.1"),
         face_port=int(face.get("port", 8765)),
         config_path=selected,
+        sparrow=sparrow,
     )

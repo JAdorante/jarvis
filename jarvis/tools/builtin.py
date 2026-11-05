@@ -5,12 +5,19 @@ import re
 import urllib.error
 import urllib.parse
 import urllib.request
+from datetime import datetime
 
 from jarvis.devices.roku import RokuError
 from jarvis.memory.extract import extract_fact
 from jarvis.tools.registry import Tool, ToolResult
 
 USER_AGENT = "JarvisPi/1.0 (home assistant on a Raspberry Pi)"
+QUESTION_WORDS = {
+    "a", "an", "and", "are", "about", "did", "do", "does", "for", "from", "how", "in", "is", "it",
+    "look", "me", "of", "on", "or", "tell", "that", "the", "their", "they", "to", "up", "was",
+    "were", "what", "what's", "when", "where", "which", "who", "who's", "why", "with", "you",
+}
+WEEKDAYS = ("monday", "tuesday", "wednesday", "thursday", "friday", "saturday", "sunday")
 
 # Longer names have to come first so "youtube tv" wins over "youtube".
 APP_CATALOG = (
@@ -40,6 +47,18 @@ APP_CATALOG = (
 def person_from_text(text):
     match = re.search(r"directed by ([A-Z][a-z]+(?: [A-Z][a-z]+){0,2})", text)
     return match.group(1) if match else ""
+
+
+def summary_answers(query, summary):
+    """The top hit has to be about the question. Otherwise it is not an answer."""
+    tokens = {word for word in re.findall(r"[a-z0-9']+", query.lower()) if word not in QUESTION_WORDS}
+    if not tokens:
+        return True
+    title, _, body = summary.partition(":")
+    if tokens & set(re.findall(r"[a-z0-9']+", title.lower())):
+        return True
+    words = set(re.findall(r"[a-z0-9']+", body.lower()))
+    return len(tokens & words) * 2 >= len(tokens)
 
 
 def wikipedia_fetch(query):
@@ -101,7 +120,7 @@ def live_weather(place, day):
                 "latitude": found["latitude"],
                 "longitude": found["longitude"],
                 "daily": "weather_code,temperature_2m_max,temperature_2m_min",
-                "forecast_days": 2,
+                "forecast_days": 7,
                 "timezone": "auto",
                 "temperature_unit": "fahrenheit",
             }
@@ -111,11 +130,24 @@ def live_weather(place, day):
     dates = daily.get("time") or []
     if not dates:
         return ""
-    index = 1 if day == "tomorrow" and len(dates) > 1 else 0
+    index = _forecast_index(dates, day)
+    if index is None:
+        return ""
     high = round(daily["temperature_2m_max"][index])
     low = round(daily["temperature_2m_min"][index])
     label = found.get("name") or place
     return f"{label} {day}: {_sky(daily['weather_code'][index])}, high {high} degrees, low {low} degrees."
+
+
+def _forecast_index(dates, day):
+    if day == "tomorrow":
+        return 1 if len(dates) > 1 else None
+    if day in WEEKDAYS:
+        for index, text in enumerate(dates):
+            if datetime.strptime(text, "%Y-%m-%d").weekday() == WEEKDAYS.index(day):
+                return index
+        return None
+    return 0
 
 
 def _sky(code):
@@ -133,9 +165,10 @@ def _sky(code):
     return "stormy"
 
 
-def build_tools(store, roku, wiki_fetch=None, legacy_user_file=None, weather_fetch=None):
+def build_tools(store, roku, wiki_fetch=None, legacy_user_file=None, weather_fetch=None, legacy_existence_file=None):
     fetch = wiki_fetch or wikipedia_fetch
     forecast = weather_fetch or live_weather
+    legacy_files = [path for path in (legacy_user_file, legacy_existence_file) if path is not None]
 
     def wikipedia(arguments, context):
         query = (arguments.get("query") or "").strip()
@@ -162,11 +195,11 @@ def build_tools(store, roku, wiki_fetch=None, legacy_user_file=None, weather_fet
                 retryable=True,
                 verified=False,
             )
-        if not summary:
+        if not summary or not summary_answers(query, summary):
             return ToolResult(
                 ok=False,
                 output={"query": query, "summary": ""},
-                speech="No Wikipedia page matched that search.",
+                speech="I did not find a Wikipedia page that answers that.",
                 error_code="not_found",
                 verified=False,
             )
@@ -174,7 +207,7 @@ def build_tools(store, roku, wiki_fetch=None, legacy_user_file=None, weather_fet
         return ToolResult(
             ok=True,
             output={"query": query, "summary": summary},
-            speech=short,
+            speech=f"According to Wikipedia, {short}",
             verified=True,
         )
 
@@ -197,6 +230,16 @@ def build_tools(store, roku, wiki_fetch=None, legacy_user_file=None, weather_fet
     def recall(arguments, context):
         query = arguments.get("query") or ""
         rows = store.search(query, limit=5, category="semantic")
+        if arguments.get("strict"):
+            words = [word for word in re.findall(r"[a-z0-9']+", query.lower()) if word not in QUESTION_WORDS | {"my", "our", "i", "we", "mine"}]
+            rows = [row for row in rows if any(word in row["content"].lower() for word in words)]
+            if not rows:
+                return ToolResult(
+                    ok=True,
+                    output={"memories": []},
+                    speech="I don't have that saved.",
+                    verified=True,
+                )
         if not rows:
             rows = store.list_memories(category="semantic", limit=8)
         if not rows:
@@ -216,11 +259,23 @@ def build_tools(store, roku, wiki_fetch=None, legacy_user_file=None, weather_fet
 
     def forget(arguments, context):
         query = arguments.get("query") or ""
-        count = store.forget_matching(query)
-        if count == 0:
-            speech = "I did not find a saved fact that matches that."
-        else:
-            speech = f"I forgot {count} saved fact{'s' if count != 1 else ''}."
+        ids = arguments.get("ids")
+        if not ids:
+            matches = store.forget_candidates(query)
+            if not matches:
+                return ToolResult(ok=True, output={"forgotten": 0}, speech="I did not find a saved fact that matches that.", verified=True)
+            if len(matches) > 1:
+                listed = " ".join(row["content"] for row in matches[:3])
+                more = f" and {len(matches) - 3} more" if len(matches) > 3 else ""
+                return ToolResult(
+                    ok=False,
+                    output={"approve": {"query": query, "ids": [row["id"] for row in matches]}},
+                    speech=f"That matches {len(matches)} saved facts{more}: {listed}",
+                    error_code="needs_approval",
+                )
+            ids = [matches[0]["id"]]
+        count = store.forget_ids(ids, legacy_files=legacy_files)
+        speech = f"I forgot {count} saved fact{'s' if count != 1 else ''}."
         return ToolResult(ok=True, output={"forgotten": count}, speech=speech, verified=True)
 
     def remind(arguments, context):
@@ -230,7 +285,7 @@ def build_tools(store, roku, wiki_fetch=None, legacy_user_file=None, weather_fet
         return ToolResult(
             ok=True,
             output={"id": reminder_id, "due_at": due_at, "text": text},
-            speech=f"I'll remind you to {text}.",
+            speech=f"I'll remind you {arguments.get('spoken_time') or 'then'} to {text}.",
             verified=True,
         )
 
@@ -352,17 +407,57 @@ def build_tools(store, roku, wiki_fetch=None, legacy_user_file=None, weather_fet
             verified=True,
         )
 
+    def schedule_list(arguments, context):
+        reminders = store.pending_reminders()
+        routines = store.active_routines()
+        if not reminders and not routines:
+            return ToolResult(ok=True, output={"reminders": [], "routines": []}, speech="Nothing is scheduled.", verified=True)
+        parts = [f"Reminder: {row['text']}." for row in reminders[:4]]
+        parts += [f"{row['name']} at {row['hour']}:{row['minute']:02d}." for row in routines[:4]]
+        return ToolResult(
+            ok=True,
+            output={"reminders": [row["id"] for row in reminders], "routines": [row["id"] for row in routines]},
+            speech=" ".join(parts),
+            verified=True,
+        )
+
+    def schedule_cancel(arguments, context):
+        query = arguments.get("query") or ""
+        if arguments.get("targets") is not None:
+            targets = arguments["targets"]
+        else:
+            targets = _schedule_matches(store, query)
+            if not targets:
+                return ToolResult(ok=True, output={"cancelled": 0}, speech="I did not find a reminder or routine that matches that.", verified=True)
+            if len(targets) > 1:
+                listed = ", ".join(item["label"] for item in targets[:3])
+                return ToolResult(
+                    ok=False,
+                    output={"approve": {"query": query, "targets": targets}},
+                    speech=f"That matches {len(targets)} items: {listed}. I can cancel all of them.",
+                    error_code="needs_approval",
+                )
+        for item in targets:
+            if item["kind"] == "reminder":
+                store.cancel_reminder(item["id"])
+            else:
+                store.disable_routine(item["id"])
+        count = len(targets)
+        return ToolResult(ok=True, output={"cancelled": count}, speech=f"I cancelled {count} scheduled item{'s' if count != 1 else ''}.", verified=True)
+
     registry_tools = [
         Tool("web.wikipedia", "Look up a short Wikipedia extract.", "L0", "read", 20, True, (), wikipedia),
-        Tool("memory.remember", "Store one fact the user stated.", "L0", "write", 5, True, ("fact",), remember),
-        Tool("memory.recall", "Read saved facts about the user.", "L0", "read", 5, True, (), recall),
-        Tool("memory.forget", "Forget saved facts that match a phrase.", "L1", "write", 5, False, ("query",), forget),
-        Tool("time.remind", "Save a one-time reminder.", "L1", "write", 5, False, ("text", "due_at"), remind),
-        Tool("roku.power", "Turn the Roku TV on or off and read power state.", "L1", "device", 8, True, ("on",), power),
-        Tool("roku.launch", "Launch a Roku app and read the active app.", "L1", "device", 8, True, ("app_id",), launch),
+        Tool("memory.remember", "Store one fact the user stated.", "L0", "write", 10, True, ("fact",), remember),
+        Tool("memory.recall", "Read saved facts about the user.", "L0", "read", 10, True, (), recall),
+        Tool("memory.forget", "Forget saved facts that match a phrase.", "L1", "write", 10, False, ("query",), forget),
+        Tool("time.remind", "Save a one-time reminder.", "L1", "write", 10, False, ("text", "due_at"), remind),
+        Tool("roku.power", "Turn the Roku TV on or off and read power state.", "L1", "device", 25, True, ("on",), power),
+        Tool("roku.launch", "Launch a Roku app and read the active app.", "L1", "device", 25, True, ("app_id",), launch),
         Tool("roku.volume", "Send a volume key. The TV does not confirm the level.", "L1", "device", 8, True, ("key",), volume),
         Tool("weather.forecast", "Look up today's or tomorrow's forecast for a city.", "L0", "read", 20, True, ("place",), weather),
-        Tool("schedule.routine", "Save a daily local-time action.", "L1", "write", 5, True, ("action", "hour", "minute"), schedule_routine),
+        Tool("schedule.routine", "Save a daily local-time action.", "L1", "write", 10, True, ("action", "hour", "minute"), schedule_routine),
+        Tool("schedule.list", "Read pending reminders and daily routines.", "L0", "read", 10, True, (), schedule_list),
+        Tool("schedule.cancel", "Cancel a reminder or daily routine.", "L1", "write", 10, False, (), schedule_cancel),
     ]
     from jarvis.tools.registry import Registry
 
@@ -370,6 +465,20 @@ def build_tools(store, roku, wiki_fetch=None, legacy_user_file=None, weather_fet
     for tool in registry_tools:
         registry.add(tool)
     return registry
+
+
+def _schedule_matches(store, query):
+    words = set(re.findall(r"[a-z0-9']+", query.lower())) - QUESTION_WORDS
+    items = [
+        {"kind": "reminder", "id": row["id"], "label": row["text"]}
+        for row in store.pending_reminders()
+    ] + [
+        {"kind": "routine", "id": row["id"], "label": row["name"]}
+        for row in store.active_routines()
+    ]
+    if not words:
+        return items
+    return [item for item in items if words & set(re.findall(r"[a-z0-9']+", item["label"].lower()))]
 
 
 def _sentences(text, count):

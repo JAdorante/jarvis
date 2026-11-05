@@ -5,14 +5,14 @@ import logging
 from pathlib import Path
 
 
-SECRET_KEYS = {"password", "token", "secret", "api_key", "authorization", "credential"}
+SECRET_WORDS = ("password", "passcode", "token", "secret", "api_key", "apikey", "authorization", "credential")
 
 
 def redact(value):
     if isinstance(value, dict):
         cleaned = {}
         for key, item in value.items():
-            if str(key).lower() in SECRET_KEYS:
+            if any(word in str(key).lower() for word in SECRET_WORDS):
                 cleaned[key] = "[redacted]"
             else:
                 cleaned[key] = redact(item)

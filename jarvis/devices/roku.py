@@ -2,6 +2,7 @@
 
 import re
 import socket
+import time
 import urllib.error
 import urllib.parse
 import urllib.request
@@ -94,10 +95,28 @@ def discover_roku(timeout=2):
 
 
 class RokuClient:
-    def __init__(self, host, port=8060, timeout=8, transport=None):
+    def __init__(self, host, port=8060, timeout=8, transport=None, settle_seconds=6, sleeper=None, clock=None):
         self.host = host
         self.port = port
         self.transport = transport or UrllibTransport(host, port, timeout)
+        self.settle_seconds = settle_seconds
+        self.sleeper = sleeper or time.sleep
+        self.clock = clock or time.monotonic
+
+    def _poll(self, read, accept):
+        """A TV takes seconds to change. Keep reading, without resending the command."""
+        deadline = self.clock() + self.settle_seconds
+        last = None
+        while True:
+            try:
+                last = read()
+                if accept(last):
+                    return last, True
+            except (RokuError, ET.ParseError):
+                pass
+            if self.clock() >= deadline:
+                return last, False
+            self.sleeper(0.5)
 
     def device_info(self):
         return {"power_mode": parse_power_mode(self.transport.get("/query/device-info"))}
@@ -111,27 +130,27 @@ class RokuClient:
     def power(self, on):
         key = "PowerOn" if on else "PowerOff"
         self.transport.post("/keypress/" + key)
-        try:
-            mode = self.device_info().get("power_mode", "")
-        except RokuError:
-            return {"submitted": True, "verified": False, "power_mode": "", "key": key}
-        expected = "PowerOn" if on else "PowerOff"
+
+        def settled(info):
+            mode = info.get("power_mode", "")
+            # A TV that is off reports DisplayOff, Ready, or similar. Only PowerOn means on.
+            return mode == "PowerOn" if on else bool(mode) and mode != "PowerOn"
+
+        info, verified = self._poll(self.device_info, settled)
         return {
             "submitted": True,
-            "verified": mode == expected,
-            "power_mode": mode,
+            "verified": verified,
+            "power_mode": (info or {}).get("power_mode", ""),
             "key": key,
         }
 
     def launch(self, app_id):
         self.transport.post("/launch/" + urllib.parse.quote(str(app_id), safe=""))
-        try:
-            active = self.active_app()
-        except RokuError:
-            return {"submitted": True, "verified": False, "active_id": "", "active_name": ""}
+        active, verified = self._poll(self.active_app, lambda app: app.get("id") == str(app_id))
+        active = active or {}
         return {
             "submitted": True,
-            "verified": active.get("id") == str(app_id),
+            "verified": verified,
             "active_id": active.get("id", ""),
             "active_name": active.get("name", ""),
         }

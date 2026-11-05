@@ -79,7 +79,7 @@ class Handler(BaseHTTPRequestHandler):
         return
 
 
-def serve(host="0.0.0.0", port=8765, background=False):
+def serve(host="127.0.0.1", port=8765, background=False):
     server = ThreadingHTTPServer((host, port), Handler)
     if background:
         import threading
